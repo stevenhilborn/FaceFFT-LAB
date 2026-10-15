@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Face FFT Lab</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,Segoe UI,sans-serif;background:#090e19;color:#eef5ff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at top,#20334c,#090e19 65%)}
+main{max-width:1300px;margin:auto;padding:28px 20px}h1{margin:0;font-size:30px}p{color:#a4b5ce}h2{font-size:17px;margin:0 0 12px}
+.panel{background:#142035;border:1px solid #30445e;border-radius:16px;padding:18px;margin-bottom:16px}
+.toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap}.toolbar>*{flex:0 1 auto}
+button,select,input[type=file]{font:inherit;color:#f1f8ff;background:#243650;border:1px solid #4b6280;border-radius:9px;padding:10px;cursor:pointer}
+button:hover{border-color:#69d9ea}button:disabled{opacity:.45;cursor:wait}label{display:block;color:#b5c6dd;font-size:12px;margin-bottom:5px}
+.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+canvas{display:block;width:100%;aspect-ratio:1;object-fit:contain;background:#070d18;border-radius:9px}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#080f1d;padding:14px;border-radius:10px;color:#9be6f2;max-height:260px;overflow:auto}
+small{color:#a4b5ce}.status{color:#69d9ea;min-height:25px}.meter{height:7px;background:#33445b;border-radius:9px;overflow:hidden;margin:8px 0 0}.fill{height:100%;background:linear-gradient(90deg,#64dce8,#a48bff);width:0}
+@media(max-width:850px){.grid{grid-template-columns:1fr}}
+</style></head><body><main>
+<h1>∿ Face FFT Lab</h1>
+<p>Turn a face photograph into a complete, exportable Fourier equation, then reconstruct it using only the saved mathematical coefficients.</p>
+<div class="panel"><h2>1 · Create your face equation</h2>
+<div class="toolbar">
+<div><label for="upload">Upload a face photo (PNG/JPEG)</label><input id="upload" type="file" accept="image/png,image/jpeg"></div>
+<div><label for="size">Equation resolution</label><select id="size"><option>64</option><option selected>128</option><option>256</option><option>512</option></select></div>
+<button id="compute" disabled>Calculate face equation</button>
+<button id="export" disabled>Download formula (.txt)</button><button id="copy" disabled>Copy formula</button>
+<button id="clear">Remove original photo</button>
+</div><p><small>🔒 Your photos never leave your browser. No images or coefficients are uploaded to a server. Higher resolutions preserve more detail but create larger formula files (512 × 512 can be tens of megabytes).</small></p>
+<div id="status" class="status" role="status" aria-live="polite">Upload a photograph to begin.</div><div class="meter"><div id="fill" class="fill"></div></div>
+</div>
+<div class="panel"><h2>2 · Reconstruct from the equation alone</h2>
+<div class="toolbar">
+<div><label for="import">Import saved formula (.txt)</label><input id="import" type="file" accept=".txt,text/plain"></div>
+<button id="rebuild" disabled>Rebuild face from equation</button>
+<button id="save" disabled>Download reconstructed PNG</button>
+</div>
+<div style="margin-top:18px"><div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap"><label for="detail">Progressive reconstruction — strongest coefficients retained</label><strong id="detailValue">100%</strong></div>
+<input type="range" id="detail" min="1" max="100" value="100" step="1" style="width:100%;accent-color:#69d9ea" disabled>
+<p><small>Move left to reveal the image from a few dominant Fourier components, then increase toward a sharp reconstruction. At 100%, every coefficient is preserved.</small></p>
+<div style="display:flex;gap:22px;flex-wrap:wrap"><span>Coefficient retention: <strong id="retention">—</strong></span><span>Reconstruction accuracy (PSNR): <strong id="accuracy">—</strong></span><span>Pixel error (RMSE): <strong id="rmse">—</strong></span></div>
+<p><small>Accuracy compares against the complete, unfiltered mathematical reconstruction at the selected FFT resolution (not the full-resolution uploaded photo).</small></p></div>
+</div>
+<div class="grid">
+<div class="panel"><h2>Original photograph</h2><canvas id="original" width="128" height="128"></canvas><p>Can be cleared before reconstruction.</p></div>
+<div class="panel"><h2>Fourier coefficient magnitude</h2><canvas id="spectrum" width="128" height="128"></canvas><p>Centered, logarithmically scaled spectrum of RGB coefficients.</p></div>
+<div class="panel"><h2>Reconstructed face</h2><canvas id="reconstruction" width="128" height="128"></canvas><p>Created using inverse FFT, not copied from the photo.</p></div>
+</div>
+<div class="panel"><h2>3 · Your mathematical formula</h2>
+<p>For each color channel c ∈ {R,G,B}, the exact discrete reconstruction equation is:</p>
+<pre>f_c(x,y) = (1 / (W × H)) × Σ[u=0..W−1] Σ[v=0..H−1]
+           (A_c[u,v] + i B_c[u,v]) × exp(2πi(ux/W + vy/H))
+
+Pixel_c(x,y) = clamp(round(Re(f_c(x,y))), 0, 255)
+
+The downloadable plain-text formula contains A_c and B_c for every frequency.</pre>
+<p id="info">No equation loaded yet.</p>
+<label for="formulaText">Complete plain-text formula (editable; paste a saved formula here, then click Rebuild from pasted text)</label><textarea id="formulaText" spellcheck="false" style="width:100%;height:220px;background:#080f1d;color:#9be6f2;border:1px solid #405772;border-radius:9px;padding:12px;font:12px/1.5 ui-monospace,monospace"></textarea><div style="margin:12px 0"><button id="pasteRebuild">Rebuild from pasted text</button></div><h2>Coefficient sample (first 12 complex coefficients per channel)</h2>
+<pre id="sample">Calculate an equation to inspect the numerical values.</pre>
+</div></main>
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+let photo=null,coeff=null,busy=false,reference=null,ranks=null,sliderTimer=null,requestVersion=0;
+const wait=()=>new Promise(r=>setTimeout(r,0));
+function state(message,p=0){$("status").textContent=message;$("fill").style.width=p+"%"}
+function canvas(id,n){const c=$(id);c.width=c.height=n;return c.getContext("2d")}
+function clearCanvas(id){const c=$(id);c.getContext("2d").clearRect(0,0,c.width,c.height)}
+function fft1(r,i,inv=false){
+ const n=r.length;
+ for(let a=1,b=0;a<n;a++){
+  let bit=n>>1;while(b&bit){b^=bit;bit>>=1}b^=bit;
+  if(a<b){let t=r[a];r[a]=r[b];r[b]=t;t=i[a];i[a]=i[b];i[b]=t}
+ }
+ for(let len=2;len<=n;len*=2){
+  const angle=(inv?2:-2)*Math.PI/len,wr=Math.cos(angle),wi=Math.sin(angle);
+  for(let base=0;base<n;base+=len){
+   let ur=1,ui=0;
+   for(let j=0;j<len/2;j++){
+    const a=base+j,b=a+len/2,vr=r[b]*ur-i[b]*ui,vi=r[b]*ui+i[b]*ur;
+    r[b]=r[a]-vr;i[b]=i[a]-vi;r[a]+=vr;i[a]+=vi;
+    const nr=ur*wr-ui*wi;ui=ur*wi+ui*wr;ur=nr;
+   }
+  }
+ }
+ if(inv)for(let k=0;k<n;k++){r[k]/=n;i[k]/=n}
+}
+async function fft2(r,i,n,inv=false){
+ const a=new Float64Array(n),b=new Float64Array(n);
+ for(let y=0;y<n;y++){
+  for(let x=0;x<n;x++){a[x]=r[y*n+x];b[x]=i[y*n+x]}
+  fft1(a,b,inv);
+  for(let x=0;x<n;x++){r[y*n+x]=a[x];i[y*n+x]=b[x]}
+  if(y%32===31)await wait();
+ }
+ for(let x=0;x<n;x++){
+  for(let y=0;y<n;y++){a[y]=r[y*n+x];b[y]=i[y*n+x]}
+  fft1(a,b,inv);
+  for(let y=0;y<n;y++){r[y*n+x]=a[y];i[y*n+x]=b[y]}
+  if(x%32===31)await wait();
+ }
+}
+function drawSpectrum(eq){
+ const n=eq.width,c=canvas("spectrum",n),img=c.createImageData(n,n),raw=new Float64Array(n*n);
+ let max=0;
+ for(let y=0;y<n;y++)for(let x=0;x<n;x++){
+  const k=y*n+x;
+  let energy=0;
+  for(let ch=0;ch<3;ch++){const [r,i]=eq.channels[ch];energy+=r[k]*r[k]+i[k]*i[k]}
+  const v=Math.log1p(Math.sqrt(energy/3));
+  const j=((y+n/2)%n)*n+(x+n/2)%n;
+  raw[j]=v;max=Math.max(max,v);
+ }
+ for(let k=0;k<raw.length;k++){
+  const z=k*4,v=Math.round(raw[k]/(max||1)*255);
+  img.data[z]=v;img.data[z+1]=v;img.data[z+2]=v;img.data[z+3]=255;
+ }
+ c.putImageData(img,0,0);
+}
+function showCoeffs(eq){
+ $("info").textContent=`${eq.width} × ${eq.height} image; ${eq.channels.length*eq.width*eq.height} complex coefficients (real and imaginary pairs). Plain-text formula can reconstruct the image without the source photo.`;
+ $("sample").textContent=eq.channels.map((ch,i)=>{
+  return ["Red","Green","Blue"][i]+":\n"+Array.from({length:12},(_,k)=>`F[${k}] = ${ch[0][k].toFixed(4)} ${ch[1][k]<0?"−":"+"} ${Math.abs(ch[1][k]).toFixed(4)}i`).join("\n");
+ }).join("\n\n");
+}
+
+function encodeFormula(eq){
+ const n=eq.width;
+ const lines=[
+  "FACE FOURIER FORMULA v1",
+  "W = "+n,
+  "H = "+n,
+  "For c = R,G,B:",
+  "f_c(x,y) = Re{ (1/(W*H)) * SUM(u=0..W-1) SUM(v=0..H-1) [F_c(u,v)*exp(2*pi*i*(u*x/W+v*y/H))] }",
+  "F_c(u,v) = A_c(u,v) + i*B_c(u,v)",
+  "Each coefficient line below is: channel,u,v,real,imag",
+  "BEGIN COEFFICIENTS"
+ ];
+ for(let ch=0;ch<3;ch++){
+  const [r,i]=eq.channels[ch],name="RGB"[ch];
+  for(let k=0;k<n*n;k++)lines.push(name+","+k%n+","+Math.floor(k/n)+","+r[k].toPrecision(17)+","+i[k].toPrecision(17));
+ }
+ lines.push("END COEFFICIENTS");
+ return lines.join("\n");
+}
+function decodeFormula(text){
+ const lines=text.trim().split(/\r?\n/);
+ if(lines[0]!=="FACE FOURIER FORMULA v1")throw Error("Not a Face Fourier Formula v1 text.");
+ const w=Number((lines[1]||"").split("=")[1]),h=Number((lines[2]||"").split("=")[1]);
+ if(![64,128,256,512].includes(w)||h!==w)throw Error("Invalid resolution.");
+ const start=lines.indexOf("BEGIN COEFFICIENTS"),end=lines.indexOf("END COEFFICIENTS");
+ if(start<0||end<start||end-start-1!==3*w*h)throw Error("Missing or incomplete coefficient lines.");
+ const channels=Array.from({length:3},()=>[new Array(w*h),new Array(w*h)]);
+ for(let line=start+1;line<end;line++){
+  const parts=lines[line].split(",");
+  if(parts.length!==5)throw Error("Invalid coefficient line "+(line+1));
+  const [c,xs,ys,rs,is]=parts,ci="RGB".indexOf(c),x=Number(xs),y=Number(ys),r=Number(rs),i=Number(is);
+  if(ci<0||!Number.isInteger(x)||!Number.isInteger(y)||x<0||y<0||x>=w||y>=h||!Number.isFinite(r)||!Number.isFinite(i))throw Error("Invalid coefficient at line "+(line+1));
+  const k=y*w+x;
+  if(channels[ci][0][k]!==undefined)throw Error("Duplicate coefficient.");
+  channels[ci][0][k]=r;channels[ci][1][k]=i;
+ }
+ return validate({format:"face-fourier-v1",width:w,height:h,channels});
+}
+function invalidateReconstruction(){
+ reference=null;ranks=null;$('accuracy').textContent='—';$('rmse').textContent='—';$('retention').textContent='—';
+ $('save').disabled=true;$('detail').disabled=!coeff;clearCanvas('reconstruction');
+}
+function setFormula(eq){$("formulaText").value=encodeFormula(eq)}
+
+function validate(obj){
+ const n=obj.width;
+ if(obj.format!=="face-fourier-v1"||![64,128,256,512].includes(n)||obj.height!==n||!Array.isArray(obj.channels)||obj.channels.length!==3)throw Error("Unsupported or invalid Fourier formula.");
+ for(const ch of obj.channels){
+  if(!Array.isArray(ch)||ch.length!==2||!ch.every(a=>Array.isArray(a)&&a.length===n*n&&a.every(Number.isFinite)))throw Error("Coefficient arrays are missing or invalid.");
+ }
+ return obj;
+}
+async function calculate(){
+ if(!photo||busy)return;
+ busy=true;$("compute").disabled=true;$("rebuild").disabled=true;
+ try{
+  const n=+$("size").value;
+  state("Resampling photograph…",5);
+  const c=document.createElement("canvas");c.width=c.height=n;
+  const ctx=c.getContext("2d",{willReadFrequently:true});
+  ctx.fillStyle="#000";ctx.fillRect(0,0,n,n);
+  const s=Math.min(n/photo.width,n/photo.height);
+  ctx.drawImage(photo,(n-photo.width*s)/2,(n-photo.height*s)/2,photo.width*s,photo.height*s);
+  const pixels=ctx.getImageData(0,0,n,n).data;
+  const channels=[];
+  for(let ch=0;ch<3;ch++){
+   state(`Calculating ${["red","green","blue"][ch]} channel Fourier coefficients…`,15+ch*23);
+   const re=new Float64Array(n*n),im=new Float64Array(n*n);
+   for(let k=0;k<n*n;k++)re[k]=pixels[4*k+ch]*pixels[4*k+3]/255;
+   await fft2(re,im,n);
+   channels.push([Array.from(re),Array.from(im)]);
+  }
+  coeff={format:"face-fourier-v1",width:n,height:n,channels};invalidateReconstruction();
+  state("Formula ready. Copy or download the formula, or reconstruct your face.",100);
+  drawSpectrum(coeff);showCoeffs(coeff);setFormula(coeff);$("copy").disabled=false;
+  $("export").disabled=false;$("rebuild").disabled=false;
+ }catch(e){state("Error: "+e.message,0);console.error(e)}
+ finally{busy=false;$("compute").disabled=!photo}
+}
+async function buildReference(eq){
+ const n=eq.width,all=n*n;
+ const rgb=[new Uint8Array(all),new Uint8Array(all),new Uint8Array(all)];
+ for(let ch=0;ch<3;ch++){
+  state(`Establishing full-quality reference (${ch+1}/3)…`,12+ch*13);
+  const r=Float64Array.from(eq.channels[ch][0]),i=Float64Array.from(eq.channels[ch][1]);
+  await fft2(r,i,n,true);
+  for(let k=0;k<all;k++)rgb[ch][k]=Math.max(0,Math.min(255,Math.round(r[k])));
+ }
+ return rgb;
+}
+function buildRanks(eq){
+ const count=eq.width*eq.height;
+ return eq.channels.map(ch=>{
+  const r=ch[0],i=ch[1],indices=Array.from({length:count},(_,k)=>k);
+  indices.sort((a,b)=>(r[b]*r[b]+i[b]*i[b])-(r[a]*r[a]+i[a]*i[a]));
+  return indices;
+ });
+}
+async function reconstruct(){
+ if(!coeff||busy)return;
+ busy=true;$('rebuild').disabled=true;$('save').disabled=true;$('detail').disabled=true;
+ const eq=coeff;
+ try{
+  if(!reference){reference=await buildReference(eq);}
+  if(!ranks){state('Sorting frequencies by strength…',55);await wait();ranks=buildRanks(eq);}
+  const n=eq.width,total=n*n,pct=Number($('detail').value);
+  const keep=pct===100?total:Math.max(1,Math.floor(total*pct/100));
+  const ctx=canvas('reconstruction',n),image=ctx.createImageData(n,n);
+  let sumSquared=0;
+  for(let ch=0;ch<3;ch++){
+   state(`Reconstructing ${['red','green','blue'][ch]} (${ch+1}/3)…`,65+ch*10);
+   const re=new Float64Array(total),im=new Float64Array(total);
+   const [srcR,srcI]=eq.channels[ch];
+   for(let j=0;j<keep;j++){
+    const k=ranks[ch][j];re[k]=srcR[k];im[k]=srcI[k];
+   }
+   await fft2(re,im,n,true);
+   for(let k=0;k<total;k++){
+    const value=Math.max(0,Math.min(255,Math.round(re[k])));
+    image.data[4*k+ch]=value;
+    const diff=value-reference[ch][k];sumSquared+=diff*diff;
+   }
+  }
+  for(let k=0;k<total;k++)image.data[4*k+3]=255;
+  ctx.putImageData(image,0,0);
+  const rmse=Math.sqrt(sumSquared/(total*3));
+  $('accuracy').textContent=rmse===0?'∞ dB (exact)':(20*Math.log10(255/rmse)).toFixed(2)+' dB';
+  $('rmse').textContent=rmse.toFixed(3)+'/255';
+  $('retention').textContent=(keep*3).toLocaleString()+' / '+(total*3).toLocaleString();
+  state('Reconstruction complete — adjust the slider to explore the Fourier components.',100);
+  $('save').disabled=false;
+ }catch(e){state('Reconstruction error: '+e.message,0);console.error(e)}
+ finally{busy=false;$('rebuild').disabled=!coeff;$('detail').disabled=!coeff;if(requestVersion>0){requestVersion=0;setTimeout(reconstruct,0)}}
+}
+$('detail').addEventListener('input',()=>{
+ $('detailValue').textContent=$('detail').value+'%';
+ clearTimeout(sliderTimer);
+ sliderTimer=setTimeout(()=>{if(busy){requestVersion=1}else{reconstruct()}},180);
+});
+function download(blob,name){
+ const url=URL.createObjectURL(blob),a=document.createElement("a");
+ a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();
+ setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+$("upload").addEventListener("change",async e=>{
+ const file=e.target.files[0];if(!file)return;
+ if(!/^image\/(png|jpeg)$/.test(file.type)){state("Please upload a PNG or JPEG image.");return}
+ try{
+  const url=URL.createObjectURL(file),img=new Image();
+  try{
+   await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=()=>reject(Error("Image could not be opened."));img.src=url});
+   photo=img;const ctx=canvas("original",Math.max(1,Math.min(512,img.width)));
+   const c=$("original");c.height=Math.max(1,Math.round(img.height*c.width/img.width));
+   ctx.drawImage(img,0,0,c.width,c.height);
+   $("compute").disabled=false;state("Photo loaded. Click Calculate face equation.");
+  }finally{URL.revokeObjectURL(url)}
+ }catch(err){state(err.message)}
+ e.target.value="";
+});
+$("compute").addEventListener("click",calculate);
+$("export").addEventListener("click",()=>{
+ if(coeff)download(new Blob([$("formulaText").value],{type:"text/plain;charset=utf-8"}),"my-face-fourier-formula.txt");
+});
+$("import").addEventListener("change",async e=>{
+ const f=e.target.files[0];if(!f)return;
+ try{
+  state("Reading saved equation…",10);
+  const obj=decodeFormula(await f.text());
+  coeff=obj;invalidateReconstruction();drawSpectrum(coeff);showCoeffs(coeff);setFormula(coeff);$("copy").disabled=false;
+  $("rebuild").disabled=false;$("export").disabled=false;
+  state("Formula imported. Click Rebuild face from equation.",100);
+ }catch(err){state("Import failed: "+err.message,0)}
+ e.target.value="";
+});
+$("rebuild").addEventListener("click",reconstruct);
+$("copy").addEventListener("click",async()=>{
+ try{await navigator.clipboard.writeText($("formulaText").value);state("Formula copied to clipboard.",100)}
+ catch(e){$("formulaText").focus();$("formulaText").select();state("Select and copy the highlighted formula.",100)}
+});
+$("pasteRebuild").addEventListener("click",async()=>{
+ try{
+  coeff=decodeFormula($("formulaText").value);invalidateReconstruction();
+  drawSpectrum(coeff);showCoeffs(coeff);
+  $("export").disabled=false;$("copy").disabled=false;$("rebuild").disabled=false;
+  await reconstruct();
+ }catch(e){state("Formula error: "+e.message,0)}
+});
+$("clear").addEventListener("click",()=>{
+ photo=null;clearCanvas("original");$("compute").disabled=true;
+ $("upload").value="";state("Original photograph removed. The saved equation is still available.",100);
+});
+$("save").addEventListener("click",()=>{
+ $("reconstruction").toBlob(blob=>{if(blob)download(blob,"reconstructed-face.png")},"image/png");
+});
+</script></body></html>
